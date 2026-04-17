@@ -1,0 +1,437 @@
+import re
+import sys
+import getopt
+import math
+from nltk.stem import PorterStemmer
+import bisect
+import ast
+from collections import defaultdict
+import heapq
+
+def usage():
+    print("usage: " + sys.argv[0] + " -d dictionary-file -p postings-file -q file-of-queries -o output-file-of-results")
+
+# Function to do Search Logic based on the query provided
+def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
+    # Use parse_dictionary function to parse the dictionary file into separate sections, returns a dictionary
+    parse_dictionary_result = parse_dictionary(dictionary_file)
+    query = ""
+    
+    # Opens the file of query and reads the 1st line as each file only has 1 query
+    with open(file_of_queries, "r", encoding="utf-8") as query_file:
+        query = query_file.readline().strip()
+        
+    # Use parse_query function to parse the query and reject invalid queries, returns an array of processed query terms
+    parsed_query, mode = parse_query(query)
+    if not parsed_query:
+        with open(file_of_output, "w", encoding="utf-8") as output_file:
+            output_file.write("")
+        return
+    
+    # query term frequencies to do TF IDF weighting for the query
+    query_tf = {}
+    
+    # Cache list of dictionary terms for query expansion to avoid repeated retrieval from the dictionary
+    cached_dictionary_terms = sorted(parse_dictionary_result["content_dict"].keys())
+    
+    with open(file_of_output, "w", encoding="utf-8") as results_file, open(postings_file, "r", encoding="utf-8") as postings_file:
+        # Handle FREE_TEXT queries first
+        if mode == "FREE_TEXT":
+            for term in parsed_query:
+                # All terms in a free text query are treated as normal terms
+                normalized_term = PorterStemmer().stem(term[1].lower())
+                query_tf[normalized_term] = query_tf.get(normalized_term, 0) + 1
+
+            N = len(parse_dictionary_result["content_doc_lengths"])
+            query_weights = compute_query_weights(query_tf, parse_dictionary_result["content_dict"], N)
+            if not query_weights:
+                results_file.write("")
+                return
+
+            # First pass: rank documents and collect doc vectors for pseudo-relevance feedback
+            initial_results, doc_vectors = calculate_cosine_similarity(
+                query_weights, parse_dictionary_result["content_dict"],
+                parse_dictionary_result["content_doc_lengths"], postings_file,
+                return_doc_vectors=True
+            )
+
+            # Rocchio pseudo-relevance feedback: treat top-10 as relevant
+            pseudo_relevant = [doc_vectors[doc_id] for doc_id in initial_results[:10] if doc_id in doc_vectors]
+            if pseudo_relevant:
+                expanded_weights = relevance_feedback_by_rocchio(query_weights, pseudo_relevant, [])
+                results = calculate_cosine_similarity(
+                    expanded_weights, parse_dictionary_result["content_dict"],
+                    parse_dictionary_result["content_doc_lengths"], postings_file
+                )
+            else:
+                results = initial_results
+
+            results_file.write(" ".join(str(x) for x in results))
+            return
+
+        if mode == "BOOLEAN":
+            # Initialize array to store intermediate posting lists for each term, before we do AND operation
+            intermediate_posting_list_array = []
+            for term in parsed_query:
+                # Initialize Set to store posting list from expanded terms
+                expanded_posting_list_set = set()
+                
+                # reset query_tf for each term in the Boolean Query, as each Phrase is treated as a separate component in the Boolean Query
+                query_tf = {}
+                
+                if term[0] == "TERM":
+                    # If it is a normal term, we will normalize the term with Porter Stemming and Lowercasing
+                    normalized_term = PorterStemmer().stem(term[1].lower())
+                    # Retrieve the set of documemts that this term occurs in
+                    query_expansion_normalized_term = query_expansion_by_prefix(normalized_term, cached_dictionary_terms)
+                    for expanded_term in query_expansion_normalized_term:
+                        # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
+                        _, offset = parse_dictionary_result["content_dict"][expanded_term]
+                        posting_list = parse_postings_line(postings_file, offset)
+                        expanded_posting_list_set.update([doc_id for doc_id, _ in posting_list])
+                    intermediate_posting_list_array.append(sorted(expanded_posting_list_set))
+                
+                elif term[0] == "PHRASE":
+                    # Extract List of Phrasal Terms
+                    phrasal_query = term[1]
+                    # For each term in the phrasal query, we will do normalization and do query term frequency counting for the phrasal query
+                    normalized_phrasal_terms = [PorterStemmer().stem(t.lower()) for t in phrasal_query]
+                    for normalized_phrasal_term in normalized_phrasal_terms:
+                        query_tf[normalized_phrasal_term] = query_tf.get(normalized_phrasal_term, 0) + 1
+                    N = len(parse_dictionary_result["content_doc_lengths"])
+                    phrase_weights = compute_query_weights(query_tf, parse_dictionary_result["content_dict"], N)
+                    phrasal_query_results = calculate_cosine_similarity(
+                        phrase_weights, parse_dictionary_result["content_dict"],
+                        parse_dictionary_result["content_doc_lengths"], postings_file
+                    )
+                    intermediate_posting_list_array.append(phrasal_query_results)
+            for i in range(len(intermediate_posting_list_array)):
+                if i == 0:
+                    current_results_set = set(intermediate_posting_list_array[i])
+                else:
+                    current_results_set = current_results_set.intersection(set(intermediate_posting_list_array[i]))
+            results_file.write(" ".join([str(x) for x in current_results_set]))
+            return
+        
+# Convert raw query term frequencies to ltc TF-IDF weights
+def compute_query_weights(query_tf, term_dictionary, N):
+    query_weights = {}
+    for term, freq in query_tf.items():
+        if term not in term_dictionary:
+            continue
+        df, _ = term_dictionary[term]
+        if df == 0:
+            continue
+        idf = math.log10(N / df)
+        query_weights[term] = (1 + math.log10(freq)) * idf
+    return query_weights
+
+def calculate_cosine_similarity(query_weights, term_dictionary, doc_length, postings_file, return_doc_vectors=False):
+    # Compute the query vector length for normalization using the pre-computed ltc weights
+    query_length_squared = sum(w ** 2 for w in query_weights.values())
+    query_length = math.sqrt(query_length_squared) if query_length_squared > 0 else 0.0
+
+    # If no query terms have weight, return empty results immediately
+    if not query_weights or query_length == 0:
+        return ([], {}) if return_doc_vectors else []
+
+    scores = {}
+    # Initialise doc_vectors only if caller needs them for Rocchio feedback
+    doc_vectors = defaultdict(dict) if return_doc_vectors else None
+
+    # For each query term, retrieve its postings list and accumulate dot-product contributions into scores
+    for term, w_tq in query_weights.items():
+        if term not in term_dictionary:
+            continue
+        df, offset = term_dictionary[term]
+        postings_list = parse_postings_line(postings_file, offset)
+        # Compute lnc document weight (log tf, no idf) and add to the running score for each document
+        for doc_id, tf_d in postings_list:
+            w_td = 1 + math.log10(tf_d)
+            scores[doc_id] = scores.get(doc_id, 0.0) + w_tq * w_td
+            if return_doc_vectors:
+                # Store unnormalized lnc weight to be divided by doc length below
+                doc_vectors[doc_id][term] = w_td
+
+    # Normalize each document score by its precomputed document length and the query length
+    for doc_id in list(scores.keys()):
+        length = doc_length.get(doc_id, 0)
+        if length != 0 and query_length != 0:
+            scores[doc_id] /= (length * query_length)
+            if return_doc_vectors:
+                # Normalize each term weight in the doc vector by the document length
+                for term in doc_vectors[doc_id]:
+                    doc_vectors[doc_id][term] /= length
+        else:
+            scores[doc_id] = 0.0
+
+    # Sort documents by descending score and filter out zero-score documents
+    ranked = [doc_id for doc_id, _ in
+              sorted(scores.items(), key=lambda x: x[1], reverse=True)
+              if scores[doc_id] > 0]
+
+    if return_doc_vectors:
+        return ranked, dict(doc_vectors)
+    return ranked
+        
+# Function to parse dictionary file into separate sections
+def parse_dictionary(dictionary_file):
+    content_dict = {}
+    title_dict = {}
+    court_dict = {}
+    content_doc_lengths = {}
+    title_doc_lengths = {}
+
+    current_section = None
+
+    with open(dictionary_file, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+
+            if not line:
+                continue
+
+            # Logic to Identify the current section of the dictionary file and parse accordingly
+            if line == "DICTIONARY TERMS FOR CONTENT":
+                current_section = "content_terms"
+                continue
+            elif line == "DICTIONARY TERMS FOR TITLE":
+                current_section = "title_terms"
+                continue
+            elif line == "DICTIONARY TERMS FOR COURT":
+                current_section = "court_terms"
+                continue
+            elif line == "DOCUMENT LENGTHS FOR CONTENT":
+                current_section = "content_lengths"
+                continue
+            elif line == "DOCUMENT LENGTH FOR TITLE":
+                current_section = "title_lengths"
+                continue
+
+            # Split the line into parts and parse based on the current section
+            parts = line.split()
+
+            # If current section is content_terms, the line is expected to be in the format: term df offset
+            if current_section == "content_terms":
+                # format: term df offset
+                term = parts[0]
+                df = int(parts[1])
+                offset = int(parts[2])
+                content_dict[term] = (df, offset)
+
+            # If current section is title_terms, the line is expected to be in the format: term df offset
+            elif current_section == "title_terms":
+                term = parts[0]
+                df = int(parts[1])
+                offset = int(parts[2])
+                title_dict[term] = (df, offset)
+
+            # If current section is court_terms, the line is expected to be in the format: term df offset, but term may contain spaces, so we need to split from the back
+            elif current_section == "court_terms":
+                # court names may contain spaces, so split from the back
+                offset = int(parts[-1])
+                df = int(parts[-2])
+                term = " ".join(parts[:-2])
+                court_dict[term] = (df, offset)
+
+            # If current section is content_lengths, the line is expected to be in the format: doc_id length
+            elif current_section == "content_lengths":
+                doc_id = parts[0]
+                length = float(parts[1])
+                content_doc_lengths[doc_id] = length
+
+            # If current section is title_lengths, the line is expected to be in the format: doc_id length
+            elif current_section == "title_lengths":
+                doc_id = parts[0]
+                length = float(parts[1])
+                title_doc_lengths[doc_id] = length
+
+    return {
+        "content_dict": content_dict,
+        "title_dict": title_dict,
+        "court_dict": court_dict,
+        "content_doc_lengths": content_doc_lengths,
+        "title_doc_lengths": title_doc_lengths
+    }
+    
+# Function to parse the query (Sanity Checks, Phrasal Queries and (AND) Queries)
+def parse_query(query):
+    # Initially split the query into an array of terms based on spaces
+    initial_processing_array = query.split()
+    processing_array = []
+    for initial_term in initial_processing_array:
+        if initial_term.startswith('"') and initial_term.endswith('"'):
+            split_term = ['"', initial_term[1:-1], '"']
+            processing_array += split_term
+        elif initial_term.startswith('"'):
+            split_term = ['"', initial_term[1:]]
+            processing_array += split_term
+        elif initial_term.endswith('"'):
+            split_term = [initial_term[:-1], '"']
+            processing_array += split_term
+        else:
+            processing_array.append(initial_term)
+    # Initialize final processed array for processed queries
+    processed_array = []
+    # Initialize mode is BOOLEAN, but it can switch to FREE_TEXT if have successive terms with no double quotes
+    mode = "BOOLEAN"
+    # flag to track the state of the double quotes
+    in_quotes = False
+    
+    # Variable to store the pharsal query when we encounter double quotes
+    phrasal_query = []
+    
+    # Subsequently, we will process the query to identify phrasal queries and AND queries, and store them
+    for i in range(len(processing_array)):
+        query_term = processing_array[i]
+        # If the query term is an AND query, and it is the first term, we will treat it as an error and return an empty array
+        if query_term == "AND" and len(processed_array) == 0:
+            print("Error: AND operator cannot be the first term in the query")
+            return [], None
+        
+        # If the query term is an AND query and it is the last term, we will treat it as an error and return an empty array
+        if query_term == "AND" and i == len(processing_array) - 1:
+            print("Error: AND operator cannot be the last term in the query")
+            return [], None
+        
+        if query_term == '"' and in_quotes:
+            in_quotes = False
+            # In the case the phrasal query ended, we just flush and store the phrasal query in the processed aray
+            if phrasal_query:
+                processed_array.append(('PHRASE', phrasal_query))
+            phrasal_query = []
+            continue
+        elif query_term == '"' and not in_quotes:
+            in_quotes = True
+            continue
+        
+        # Free Text Query if not inquotes and multiple terms appear successively without AND operator
+        if query_term != "AND" and len(processed_array) > 0 and processed_array[-1][0] == "TERM" and not in_quotes:
+            mode = "FREE_TEXT"
+            processed_array.append(('TERM', query_term))
+            continue
+        
+        # If the query is a Free Text Query and the current term is an AND operator, return empty array as it is an invalid query
+        if query_term == "AND" and mode == "FREE_TEXT":
+            print("Error: AND operator cannot appear in a free text query")
+            return [], None
+        
+        # If the query term is not an AND operator and it is immediately after a phrasal query
+        # (indicated by a closing double quote) and the AND operator did not appear before in the query
+        if query_term != "AND" and processed_array and processed_array[-1][0] == "PHRASE" and not in_quotes and processing_array[i-1] != "AND":
+            print("Error: Missing AND operator between phrasal query and other terms")
+            return [], None
+    
+        else:
+            # If term is not an AND operator and we are not in quotes, it is just a normal term
+            if query_term != "AND" and not in_quotes:
+                # We also store the normal term in the processed array
+                processed_array.append(('TERM', query_term))
+            
+            # If the term is AND operator, we continue as AND operator is Commutative
+            elif query_term == "AND":
+                continue
+            
+            # If we are in quotes, keep building the phrasal query
+            elif in_quotes:
+                phrasal_query.append(query_term)
+            
+        # If there are unmatched double quotes, we will treat it as an error and return an empty array
+        if in_quotes and i == len(processing_array) - 1:
+            print("Error: Unmatched double quote in the query")
+            return [], None
+        
+    # If the phrasal query is the only component in the Boolean query, it is an error, return an empty array
+    if len(processed_array) == 1 and processed_array[0][0] == "PHRASE":
+        print("Error: Phrasal query cannot be the only component in Boolean query")
+        return [], None
+        
+    return processed_array, mode
+
+# Function to read posting file based on offset and parse the line to get the document_id and term frequencies
+def parse_postings_line(postings_file, offset):
+    # Parses strings like: "(1, 2) (5, 7) (10, 1)"
+    line = read_postings_at_offset(postings_file, offset)
+    matches = re.findall(r"\(['\"]([^'\"]+)['\"],\s*(\d+)\)", line)
+    postings = []
+
+    for doc_id, tf in matches:
+        postings.append((str(doc_id), int(tf)))
+    return postings
+
+# Function to read posting file based on offset and parse the line
+def read_postings_at_offset(postings_file, offset):
+    postings_file.seek(offset)
+    line = postings_file.readline().strip()
+    return line
+
+# Function to Perform Query Expansion by Prefix Matching for a Given Query Term 
+def query_expansion_by_prefix(query_term, dictionary_terms):
+    # Use bisect to find the insertion point for the query term in the sorted list of dictionary terms:
+    index = bisect.bisect_left(dictionary_terms, query_term)
+    expanded_terms = []
+    
+    while index < len(dictionary_terms) and dictionary_terms[index].startswith(query_term):
+        expanded_terms.append(dictionary_terms[index])
+        index += 1
+    return expanded_terms
+
+def relevance_feedback_by_rocchio(query_term, relevant_docs, irrelevent_docs):
+    alpha=1.0
+    beta=0.75
+    gamma=0.15
+    k=10
+    max_expansion_terms=20
+
+    if irrelevent_docs is None:
+        irrelevent_docs = []
+
+    new_query = defaultdict(float)
+
+    # Turn original query into weights
+    for term, weight in query_term.items():
+        new_query[term] += alpha * weight
+    
+    # Add weights from relevant docs
+    if relevant_docs:
+        for doc in relevant_docs:
+            for term, weight in doc.items():
+                new_query[term] += beta * (weight/len(relevant_docs))
+
+    # Reduced weights from irrelevant docs
+    if irrelevent_docs:
+        for doc in irrelevent_docs:
+            for term,weight in doc.items():
+                new_query[term] -= gamma * (weight/len(irrelevent_docs))
+
+    # Remove negative weights
+    cleaned_query = {term: max(0.0, weight) for term, weight in new_query.items()}
+
+    top_terms = heapq.nlargest(k,cleaned_query.items(),key=lambda x:x[1])
+    return dict(top_terms[:k])
+
+dictionary_file = postings_file = file_of_queries = file_of_output = None
+
+try:
+    opts, args = getopt.getopt(sys.argv[1:], 'd:p:q:o:')
+except getopt.GetoptError:
+    usage()
+    sys.exit(2)
+
+for o, a in opts:
+    if o == '-d':
+        dictionary_file = a
+    elif o == '-p':
+        postings_file = a
+    elif o == '-q':
+        file_of_queries = a
+    elif o == '-o':
+        file_of_output = a
+    else:
+        assert False, "unhandled option"
+
+if dictionary_file == None or postings_file == None or file_of_queries == None or file_of_output == None:
+    usage()
+    sys.exit(2)
+
+run_search(dictionary_file, postings_file, file_of_queries, file_of_output)

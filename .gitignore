@@ -1,0 +1,9 @@
+.gradle/
+build/
+out/
+.idea/
+*.class
+*.jar
+
+postings.txt
+dictionary.txt
