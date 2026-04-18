@@ -80,6 +80,8 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 if term[0] == "TERM":
                     # If it is a normal term, we will normalize the term with Porter Stemming and Lowercasing
                     normalized_term = PorterStemmer().stem(term[1].lower())
+                    # Temporary Array to store the doc_id of original and expanded terms
+                    temporary_array = []
                     # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
                     if normalized_term in parse_dictionary_result["content_dict"]:
                         # add prefix expansions for TERM only as Query Expansion
@@ -89,10 +91,11 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                             posting_list = parse_postings_line(postings_file, offset)
                             if expanded_term == normalized_term:
                                 #  Initialize each relevant doc_id for the term with score value of 1.0 for the actual term
-                                intermediate_posting_list_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                                temporary_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
                             elif expanded_term != normalized_term:
                                 # Since this is an expanded term, we give it lighter weight
-                                intermediate_posting_list_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                                temporary_array.append([(doc_id, 0.3) for doc_id, _ in posting_list])
+                        intermediate_posting_list_array.append(union_posting_lists_for_query_expansion(temporary_array))
                     else:
                         intermediate_posting_list_array.append([])
                 
@@ -531,6 +534,17 @@ def get_court_posting_list_if_exact_match(query_text, court_dict, postings_file)
         return [(doc_id, 1.0) for doc_id, _ in posting_list]
     return None
     
+# Function to do Union on Query Term with its Expanded Terms
+def union_posting_lists_for_query_expansion(intermediate_posting_list):
+    merge_postings = {}
+
+    for posting_list in intermediate_posting_list:
+        for doc_id, weight in posting_list:
+            merge_postings[doc_id] = max(merge_postings.get(doc_id, 0), weight)
+
+    # Ensure sorted by doc_id for AND intersection operation later if needed
+    return sorted(merge_postings.items(), key=lambda x: x[0])
+            
 
 dictionary_file = postings_file = file_of_queries = file_of_output = None
 
