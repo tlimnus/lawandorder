@@ -10,6 +10,23 @@ import heapq
 def usage():
     print("usage: " + sys.argv[0] + " -d dictionary-file -p postings-file -q file-of-queries -o output-file-of-results")
 
+def normalize_query_text(text):
+    """
+    Normalize a query token/string the same way as index.py:
+    - extract alphabetic chunks
+    - lowercase
+    - stem
+    """
+    normalized = []
+    subwords = re.findall(r"[A-Za-z]+", text)
+    stemmer = PorterStemmer()
+    
+    for subword in subwords:
+        subword = subword.lower()
+        normalized.append(stemmer.stem(subword))
+
+    return normalized
+
 # Function to do Search Logic based on the query provided
 def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
     # Use parse_dictionary function to parse the dictionary file into separate sections, returns a dictionary
@@ -45,9 +62,21 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 results_file.write(" ".join(str(x[0]) for x in court_results))
                 return
             for term in parsed_query:
-                # All terms in a free text query are treated as normal terms, so the second element is the term
-                normalized_term = PorterStemmer().stem(term[1].lower())
-                query_tf[normalized_term] = query_tf.get(normalized_term, 0) + 1
+                # It should be of type tuple and be length 2
+                if not isinstance(term, tuple) or len(term) != 2:
+                    continue
+
+                if term[0] == "TERM" and isinstance(term[1], str):
+                    normalized_terms = normalize_query_text(term[1])
+                    for normalized_term in normalized_terms:
+                        query_tf[normalized_term] = query_tf.get(normalized_term, 0) + 1
+
+                elif term[0] == "PHRASE" and isinstance(term[1], list):
+                    for phrase_word in term[1]:
+                        if isinstance(phrase_word, str):
+                            normalized_terms = normalize_query_text(term[1])
+                            for normalized_term in normalized_terms:
+                                query_tf[normalized_term] = query_tf.get(normalized_term, 0) + 1
 
             # Let N be the total number of documents
             N = len(parse_dictionary_result["content_doc_lengths"])
@@ -65,8 +94,8 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 N
             )
             
-            # If none of the normalized query terms are in the dictionary, just write empty line and return
-            if not content_query_weights:
+            # If none of the normalized query terms are in the title and content dictionary, just write empty line and return
+            if not content_query_weights and not title_query_weights:
                 results_file.write("")
                 return
             
@@ -78,14 +107,13 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 postings_file
             )
 
-
             title_results = calculate_cosine_similarity(
                 title_query_weights,
                 parse_dictionary_result["title_dict"],
                 parse_dictionary_result["title_doc_lengths"],
                 postings_file
             )
-            results = combine_field_scores(content_results, title_results, title_weight=2.0)
+            results = combine_field_scores(content_results, title_results)
                 
             # Each element in result is a tuple of (doc_id, tf-idf score value)
             results_file.write(" ".join(str(x[0]) for x in results))
@@ -103,13 +131,31 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 
                 if term[0] == "TERM":
                     # If it is a normal term, we will normalize the term with Porter Stemming and Lowercasing
-                    normalized_term = PorterStemmer().stem(term[1].lower())
-                    # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
-                    if normalized_term in cached_dictionary_terms:
-                        _, offset = parse_dictionary_result["content_dict"][normalized_term]
-                        posting_list = parse_postings_line(postings_file, offset)
-                        #  Initialize each relevant doc_id for the term with score value of 1.0
-                        intermediate_posting_list_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                    normalized_term = normalize_query_text(term[1])
+                    
+                    # If no normalized terms just skip and append empty array
+                    if not normalized_terms:
+                        intermediate_posting_list_array.append([])
+                        continue
+                    
+                    # Iterate through normalized terms in case theres more than one
+                    for normalized_term in normalized_terms:
+                        # Temporary Array to store the doc_id of original and expanded terms
+                        temporary_array = []
+                        # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
+                        if normalized_term in parse_dictionary_result["content_dict"]:
+                            # add prefix expansions for TERM only as Query Expansion
+                            expanded_terms = query_expansion_by_prefix(normalized_term, cached_dictionary_terms)
+                            for expanded_term in expanded_terms:
+                                _, offset = parse_dictionary_result["content_dict"][expanded_term]
+                                posting_list = parse_postings_line(postings_file, offset)
+                                if expanded_term == normalized_term:
+                                    #  Initialize each relevant doc_id for the term with score value of 1.0 for the actual term
+                                    temporary_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                                elif expanded_term != normalized_term:
+                                    # Since this is an expanded term, we give it lighter weight
+                                    temporary_array.append([(doc_id, 0.3) for doc_id, _ in posting_list])
+                            intermediate_posting_list_array.append(union_posting_lists_for_query_expansion(temporary_array))
                     else:
                         intermediate_posting_list_array.append([])
                 
@@ -133,7 +179,9 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                         continue
                     
                     # For each term in the phrasal query, we will do normalization and do query term frequency counting for the phrasal query
-                    normalized_phrasal_terms = [PorterStemmer().stem(t.lower()) for t in phrasal_query]
+                    normalized_phrasal_terms = []
+                    for t in phrasal_query:
+                        normalized_phrasal_terms.extend(normalize_query_text(t))
                     for normalized_phrasal_term in normalized_phrasal_terms:
                         query_tf[normalized_phrasal_term] = query_tf.get(normalized_phrasal_term, 0) + 1
                         
@@ -170,7 +218,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                     phrasal_query_results = combine_field_scores(
                         content_phrase_results,
                         title_phrase_results,
-                        title_weight=2.0
+                        title_weight= 0.5
                     )
                     
                     # Sort by doc_id so that we can do set AND operations using 2 pointers
@@ -235,7 +283,7 @@ def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_
             
     return results
 
-def combine_field_scores(content_scores, title_scores, title_weight=2.0):
+def combine_field_scores(content_scores, title_scores, title_weight=0.5):
     combined = defaultdict(float)
 
     for doc_id, score in content_scores:
@@ -502,15 +550,23 @@ def read_postings_at_offset(postings_file, offset):
     line = postings_file.readline().strip()
     return line
 
-# Function to Perform Query Expansion by Prefix Matching for a Given Query Term 
-def query_expansion_by_prefix(query_term, dictionary_terms):
-    # Use bisect to find the insertion point for the query term in the sorted list of dictionary terms:
+def query_expansion_by_prefix(query_term, dictionary_terms, max_expansions=5):
+    if not query_term or len(query_term) < 4 or not query_term.isalpha():
+        return [query_term]
+
     index = bisect.bisect_left(dictionary_terms, query_term)
-    expanded_terms = []
-    
-    while index < len(dictionary_terms) and dictionary_terms[index].startswith(query_term):
-        expanded_terms.append(dictionary_terms[index])
+    expanded_terms = [query_term]
+
+    while index < len(dictionary_terms):
+        candidate = dictionary_terms[index]
+        if not candidate.startswith(query_term):
+            break
+        if candidate != query_term:
+            expanded_terms.append(candidate)
+            if len(expanded_terms) >= max_expansions + 1:
+                break
         index += 1
+
     return expanded_terms
 
 def relevance_feedback_by_rocchio(query_term, relevant_docs, irrelevent_docs):
@@ -559,17 +615,6 @@ def get_court_posting_list_if_exact_match(query_text, court_dict, postings_file)
         posting_list = parse_postings_line(postings_file, offset)
         return [(doc_id, 1.0) for doc_id, _ in posting_list]
     return None
-
-def get_court_posting_list_if_exact_match(query_text, court_dict, postings_file):
-    # lower case the query text
-    lowered_query = query_text.strip().lower()
-
-    # Check if there in exact match in court_dictionary
-    if lowered_query in court_dict.keys():
-        _, offset = court_dict[lowered_query]
-        posting_list = parse_postings_line(postings_file, offset)
-        return [(doc_id, 1.0) for doc_id, _ in posting_list]
-    return None
     
 # Function to do Union on Query Term with its Expanded Terms
 def union_posting_lists_for_query_expansion(intermediate_posting_list):
@@ -581,7 +626,6 @@ def union_posting_lists_for_query_expansion(intermediate_posting_list):
 
     # Ensure sorted by doc_id for AND intersection operation later if needed
     return sorted(merge_postings.items(), key=lambda x: x[0])
-
 
 dictionary_file = postings_file = file_of_queries = file_of_output = None
 
