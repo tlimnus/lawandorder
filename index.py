@@ -5,6 +5,8 @@ import nltk
 import csv
 import math
 
+import re
+
 from nltk.stem import PorterStemmer
 
 # Use maxInt to set the maximum field size limit for CSV reader, this is needed because some cases have very long content
@@ -40,9 +42,25 @@ def iter_cases(input_directory):
                 "court": row["court"],
             }
             
-# Function to Normalize Tokens by Lowercasing and Stemming using Porter Stemmer, used in both content and title indexing
+# Function to Normalize Tokens by extracting alphabetic subwords,
+# then lowercasing and stemming them.
 def normalize_tokens(tokens, porter):
-    return [porter.stem(token.lower()) for token in tokens]
+    normalized = []
+
+    for token in tokens:
+        # Extract alphabetic chunks only.
+        # Examples:
+        # "damages.171" -> ["damages"]
+        # "damages-art" -> ["damages", "art"]
+        # "(Damages)" -> ["Damages"]
+        # "s.33" -> ["s"]
+        subwords = re.findall(r"[A-Za-z]+", token)
+
+        for subword in subwords:
+            subword = subword.lower()
+            normalized.append(porter.stem(subword))
+
+    return normalized
 
 # Function to Add Term to the Index Dictionary, used for both content and title indexing
 def add_term(postings_dict, term, doc_id):
