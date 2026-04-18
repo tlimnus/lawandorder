@@ -71,12 +71,13 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 return
             
             # do pseudo relevant feedback withtf-idf cosine similarity for ranking
-            content_results = calculate_cosine_similarity(
+            content_results = pseudo_relevant_feedback_ranking(
                 content_query_weights,
                 parse_dictionary_result["content_dict"],
                 parse_dictionary_result["content_doc_lengths"],
                 postings_file
             )
+
 
             title_results = calculate_cosine_similarity(
                 title_query_weights,
@@ -558,6 +559,28 @@ def get_court_posting_list_if_exact_match(query_text, court_dict, postings_file)
         posting_list = parse_postings_line(postings_file, offset)
         return [(doc_id, 1.0) for doc_id, _ in posting_list]
     return None
+
+def get_court_posting_list_if_exact_match(query_text, court_dict, postings_file):
+    # lower case the query text
+    lowered_query = query_text.strip().lower()
+
+    # Check if there in exact match in court_dictionary
+    if lowered_query in court_dict.keys():
+        _, offset = court_dict[lowered_query]
+        posting_list = parse_postings_line(postings_file, offset)
+        return [(doc_id, 1.0) for doc_id, _ in posting_list]
+    return None
+    
+# Function to do Union on Query Term with its Expanded Terms
+def union_posting_lists_for_query_expansion(intermediate_posting_list):
+    merge_postings = {}
+
+    for posting_list in intermediate_posting_list:
+        for doc_id, weight in posting_list:
+            merge_postings[doc_id] = max(merge_postings.get(doc_id, 0), weight)
+
+    # Ensure sorted by doc_id for AND intersection operation later if needed
+    return sorted(merge_postings.items(), key=lambda x: x[0])
 
 
 dictionary_file = postings_file = file_of_queries = file_of_output = None
