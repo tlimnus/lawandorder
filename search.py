@@ -74,7 +74,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 elif term[0] == "PHRASE" and isinstance(term[1], list):
                     for phrase_word in term[1]:
                         if isinstance(phrase_word, str):
-                            normalized_terms = normalize_query_text(term[1])
+                            normalized_terms = normalize_query_text(phrase_word)
                             for normalized_term in normalized_terms:
                                 query_tf[normalized_term] = query_tf.get(normalized_term, 0) + 1
 
@@ -131,7 +131,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 
                 if term[0] == "TERM":
                     # If it is a normal term, we will normalize the term with Porter Stemming and Lowercasing
-                    normalized_term = normalize_query_text(term[1])
+                    normalized_terms = normalize_query_text(term[1])
                     
                     # If no normalized terms just skip and append empty array
                     if not normalized_terms:
