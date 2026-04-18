@@ -4,10 +4,9 @@ import getopt
 import math
 from nltk.stem import PorterStemmer
 import bisect
-import ast
 from collections import defaultdict
 import heapq
-
+    
 def usage():
     print("usage: " + sys.argv[0] + " -d dictionary-file -p postings-file -q file-of-queries -o output-file-of-results")
 
@@ -23,6 +22,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
         
     # Use parse_query function to parse the query and reject invalid queries, returns an array of processed query terms
     parsed_query, mode = parse_query(query)
+    
     if not parsed_query:
         with open(file_of_output, "w", encoding="utf-8") as output_file:
             output_file.write("")
@@ -37,44 +37,42 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
     with open(file_of_output, "w", encoding="utf-8") as results_file, open(postings_file, "r", encoding="utf-8") as postings_file:
         # Handle FREE_TEXT queries first
         if mode == "FREE_TEXT":
+            # Court-name exact match take precedence for Free Text Matching
+            court_results = get_court_posting_list_if_exact_match(query, parse_dictionary_result["court_dict"], postings_file)
+            
+            # exact match found just write to results_file and return
+            if court_results is not None:
+                results_file.write(" ".join(str(x[0]) for x in court_results))
+                return
             for term in parsed_query:
-                # All terms in a free text query are treated as normal terms
+                # All terms in a free text query are treated as normal terms, so the second element is the term
                 normalized_term = PorterStemmer().stem(term[1].lower())
                 query_tf[normalized_term] = query_tf.get(normalized_term, 0) + 1
 
+            # Let N be the total number of documents
             N = len(parse_dictionary_result["content_doc_lengths"])
+            
+            # Calculate query weights based on TF-IDF weighting, LTC scheme
             query_weights = compute_query_weights(query_tf, parse_dictionary_result["content_dict"], N)
+            
+            # If none of the normalized query terms are in the dictionary, just write empty line and return
             if not query_weights:
                 results_file.write("")
                 return
-
-            # First pass: rank documents and collect doc vectors for pseudo-relevance feedback
-            initial_results, doc_vectors = calculate_cosine_similarity(
-                query_weights, parse_dictionary_result["content_dict"],
-                parse_dictionary_result["content_doc_lengths"], postings_file,
-                return_doc_vectors=True
-            )
-
-            # Rocchio pseudo-relevance feedback: treat top-10 as relevant
-            pseudo_relevant = [doc_vectors[doc_id] for doc_id in initial_results[:10] if doc_id in doc_vectors]
-            if pseudo_relevant:
-                expanded_weights = relevance_feedback_by_rocchio(query_weights, pseudo_relevant, [])
-                results = calculate_cosine_similarity(
-                    expanded_weights, parse_dictionary_result["content_dict"],
-                    parse_dictionary_result["content_doc_lengths"], postings_file
-                )
-            else:
-                results = initial_results
-
-            results_file.write(" ".join(str(x) for x in results))
+            
+            # do pseudo relevant feedback withtf-idf cosine similarity for ranking
+            results = pseudo_relevant_feedback_ranking(query_weights, parse_dictionary_result["content_dict"], parse_dictionary_result["content_doc_lengths"], postings_file)
+                
+            # Each element in result is a tuple of (doc_id, tf-idf score value)
+            results_file.write(" ".join(str(x[0]) for x in results))
             return
 
+        # Handle Boolean Queries
         if mode == "BOOLEAN":
             # Initialize array to store intermediate posting lists for each term, before we do AND operation
             intermediate_posting_list_array = []
+ 
             for term in parsed_query:
-                # Initialize Set to store posting list from expanded terms
-                expanded_posting_list_set = set()
                 
                 # reset query_tf for each term in the Boolean Query, as each Phrase is treated as a separate component in the Boolean Query
                 query_tf = {}
@@ -82,38 +80,112 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 if term[0] == "TERM":
                     # If it is a normal term, we will normalize the term with Porter Stemming and Lowercasing
                     normalized_term = PorterStemmer().stem(term[1].lower())
-                    # Retrieve the set of documemts that this term occurs in
-                    query_expansion_normalized_term = query_expansion_by_prefix(normalized_term, cached_dictionary_terms)
-                    for expanded_term in query_expansion_normalized_term:
-                        # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
-                        _, offset = parse_dictionary_result["content_dict"][expanded_term]
+                    # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
+                    if normalized_term in cached_dictionary_terms:
+                        _, offset = parse_dictionary_result["content_dict"][normalized_term]
                         posting_list = parse_postings_line(postings_file, offset)
-                        expanded_posting_list_set.update([doc_id for doc_id, _ in posting_list])
-                    intermediate_posting_list_array.append(sorted(expanded_posting_list_set))
+                        #  Initialize each relevant doc_id for the term with score value of 1.0
+                        intermediate_posting_list_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                    else:
+                        intermediate_posting_list_array.append([])
                 
                 elif term[0] == "PHRASE":
                     # Extract List of Phrasal Terms
                     phrasal_query = term[1]
+                    
+                    # Reconstrcut the Phrasal Query in continuous text
+                    phrase_text = " ".join(term[1])
+                    
+                    # Check if theres exact match for court name
+                    court_results = get_court_posting_list_if_exact_match(
+                        phrase_text,
+                        parse_dictionary_result["court_dict"],
+                        postings_file
+                    )
+                    
+                    # If there is exact match, write to results_file and return
+                    if court_results is not None:
+                        intermediate_posting_list_array.append(court_results)
+                        continue
+                    
                     # For each term in the phrasal query, we will do normalization and do query term frequency counting for the phrasal query
                     normalized_phrasal_terms = [PorterStemmer().stem(t.lower()) for t in phrasal_query]
                     for normalized_phrasal_term in normalized_phrasal_terms:
                         query_tf[normalized_phrasal_term] = query_tf.get(normalized_phrasal_term, 0) + 1
+                        
+                    # Let N be the total number of documents 
                     N = len(parse_dictionary_result["content_doc_lengths"])
+                    
+                    # Calculate query weights based on TF-IDF weighting, LTC scheme
                     phrase_weights = compute_query_weights(query_tf, parse_dictionary_result["content_dict"], N)
-                    phrasal_query_results = calculate_cosine_similarity(
-                        phrase_weights, parse_dictionary_result["content_dict"],
-                        parse_dictionary_result["content_doc_lengths"], postings_file
-                    )
+        
+                    phrasal_query_results = pseudo_relevant_feedback_ranking(phrase_weights, parse_dictionary_result["content_dict"], 
+                        parse_dictionary_result["content_doc_lengths"], postings_file)
+                    
+                    # Sort by doc_id so that we can do set AND operations using 2 pointers
+                    phrasal_query_results = sorted(phrasal_query_results, key=lambda x: x[0])
                     intermediate_posting_list_array.append(phrasal_query_results)
-            for i in range(len(intermediate_posting_list_array)):
-                if i == 0:
-                    current_results_set = set(intermediate_posting_list_array[i])
-                else:
-                    current_results_set = current_results_set.intersection(set(intermediate_posting_list_array[i]))
-            results_file.write(" ".join([str(x) for x in current_results_set]))
+                    
+            # Initialize final results array
+            final_results = intermediate_posting_list_array[0] if len(intermediate_posting_list_array) > 0 else []
+            
+            # If the intermediate_posting_list_array is 1, write final results to results file and return to end program
+            if len(intermediate_posting_list_array) == 1:
+                # Sort by descending score before writing to results_file
+                final_results = sorted(final_results, key=lambda x: x[1], reverse=True)
+                results_file.write(" ".join(str(x[0]) for x in final_results))
+                return
+            
+            # Repeatedly AND-merge with the remaining posting lists
+            for idx in range(1, len(intermediate_posting_list_array)):
+                current_list = intermediate_posting_list_array[idx]
+
+                i, j = 0, 0
+                merged_results = []
+
+                while i < len(final_results) and j < len(current_list):
+                    final_doc_id, final_score = final_results[i]
+                    current_doc_id, current_score = current_list[j]
+
+                    if final_doc_id == current_doc_id:
+                        merged_results.append((final_doc_id, final_score * current_score))
+                        i += 1
+                        j += 1
+                    elif final_doc_id < current_doc_id:
+                        i += 1
+                    else:
+                        j += 1
+                final_results = merged_results
+
+            # Rank final intersection by score descending
+            final_results = sorted(final_results, key=lambda x: x[1], reverse=True)
+            results_file.write(" ".join(str(x[0]) for x in final_results))
             return
+                
+# Function to do Cosine Similarity, followed by taking the top 10 as relevant
+# Adjust the query vector based on relevance feedback
+# Do Cosine Similarity again based on the new query feedback
+def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_document_length, postings_file):
+    # First pass: rank documents and collect doc vectors for pseudo-relevance feedback
+    initial_results, doc_vectors = calculate_cosine_similarity(
+        query_weights, content_dictionary, content_document_length, postings_file,
+        return_doc_vectors=True
+    )
+    
+    # Rocchio pseudo-relevance feedback: treat top-10 as relevant
+    pseudo_relevant = [doc_vectors[doc_id] for doc_id, _ in initial_results[:10] if doc_id in doc_vectors]
+    if pseudo_relevant:
+        # do relevance feedback using rocchio
+        expanded_weights = relevance_feedback_by_rocchio(query_weights, pseudo_relevant, [])
+        # recalculate similarity scoring using tf-idf scoring with adjusted search query
+        results = calculate_cosine_similarity(expanded_weights, content_dictionary, content_document_length, postings_file)
+    else:
+        results = initial_results
+            
+    return results   
         
 # Convert raw query term frequencies to ltc TF-IDF weights
+# returns a dictionary in the form {term, weights}
 def compute_query_weights(query_tf, term_dictionary, N):
     query_weights = {}
     for term, freq in query_tf.items():
@@ -126,7 +198,7 @@ def compute_query_weights(query_tf, term_dictionary, N):
         query_weights[term] = (1 + math.log10(freq)) * idf
     return query_weights
 
-def calculate_cosine_similarity(query_weights, term_dictionary, doc_length, postings_file, return_doc_vectors=False):
+def calculate_cosine_similarity(query_weights, term_dictionary, doc_length, postings_file, return_doc_vectors = False):
     # Compute the query vector length for normalization using the pre-computed ltc weights
     query_length_squared = sum(w ** 2 for w in query_weights.values())
     query_length = math.sqrt(query_length_squared) if query_length_squared > 0 else 0.0
@@ -134,16 +206,19 @@ def calculate_cosine_similarity(query_weights, term_dictionary, doc_length, post
     # If no query terms have weight, return empty results immediately
     if not query_weights or query_length == 0:
         return ([], {}) if return_doc_vectors else []
-
+    
     scores = {}
-    # Initialise doc_vectors only if caller needs them for Rocchio feedback
+     # Initialise doc_vectors only if caller needs them for Rocchio feedback
     doc_vectors = defaultdict(dict) if return_doc_vectors else None
 
     # For each query term, retrieve its postings list and accumulate dot-product contributions into scores
     for term, w_tq in query_weights.items():
+        # If query term is not in ters dictionary, continue
         if term not in term_dictionary:
             continue
-        df, offset = term_dictionary[term]
+        # retrieve offset from term dictionary
+        _, offset = term_dictionary[term]
+        # retrieve the postings list and parse
         postings_list = parse_postings_line(postings_file, offset)
         # Compute lnc document weight (log tf, no idf) and add to the running score for each document
         for doc_id, tf_d in postings_list:
@@ -166,7 +241,7 @@ def calculate_cosine_similarity(query_weights, term_dictionary, doc_length, post
             scores[doc_id] = 0.0
 
     # Sort documents by descending score and filter out zero-score documents
-    ranked = [doc_id for doc_id, _ in
+    ranked = [(doc_id, score_value) for doc_id, score_value in
               sorted(scores.items(), key=lambda x: x[1], reverse=True)
               if scores[doc_id] > 0]
 
@@ -381,7 +456,6 @@ def relevance_feedback_by_rocchio(query_term, relevant_docs, irrelevent_docs):
     beta=0.75
     gamma=0.15
     k=10
-    max_expansion_terms=20
 
     if irrelevent_docs is None:
         irrelevent_docs = []
@@ -407,8 +481,23 @@ def relevance_feedback_by_rocchio(query_term, relevant_docs, irrelevent_docs):
     # Remove negative weights
     cleaned_query = {term: max(0.0, weight) for term, weight in new_query.items()}
 
+    # use heapq to get k largest weights and their respective terms
     top_terms = heapq.nlargest(k,cleaned_query.items(),key=lambda x:x[1])
-    return dict(top_terms[:k])
+    
+    # return it as a dictionary
+    return dict(top_terms)
+
+def get_court_posting_list_if_exact_match(query_text, court_dict, postings_file):
+    # lower case the query text
+    lowered_query = query_text.strip().lower()
+
+    # Check if there in exact match in court_dictionary
+    if lowered_query in court_dict.keys():
+        _, offset = court_dict[lowered_query]
+        posting_list = parse_postings_line(postings_file, offset)
+        return [(doc_id, 1.0) for doc_id, _ in posting_list]
+    return None
+    
 
 dictionary_file = postings_file = file_of_queries = file_of_output = None
 

@@ -46,46 +46,39 @@ def normalize_tokens(tokens, porter):
 
 # Function to Add Term to the Index Dictionary, used for both content and title indexing
 def add_term(postings_dict, term, doc_id):
+    # If Term is not in posting_dict, initialize term and doc_id
     if term not in postings_dict:
         postings_dict[term] = {doc_id: 1}
+    # elif the term is already initialize but doc_id is not inside, initialize doc_id
     elif doc_id not in postings_dict[term]:
         postings_dict[term][doc_id] = 1
+    # if term and doc_id is inside, then can increment it
     else:
         postings_dict[term][doc_id] += 1
         
-# Function to build index for Content of the Document
-def index_content(text, doc_id, postings_dict, porter):
+# Function to build index for Content and Title of the Document
+def index_content_title_text(text, doc_id, postings_dict, porter):
     # Use NLTK Tokenizer to Split Document into Sentences
     sentences = nltk.sent_tokenize(text)
     for sentence in sentences:
+        # Use NLTK Word Tokenizer to tokenize the words in the sentence
         words = nltk.word_tokenize(sentence)
-        #  Normalize the Tokens by Lowercasing and Stemming using Porter Stemmer
+        # Normalize the Tokens by Lowercasing and Stemming using Porter Stemmer
         normalized_words = normalize_tokens(words, porter)
         # Add Each Normalized Word to the Index Dictionary with the Document ID and Term Frequency
         for word in normalized_words:
             add_term(postings_dict, word, doc_id)
-
-# Function to build index for Title of the Document
-def index_title(title, doc_id, postings_dict, porter):
-    # Use NLTK Tokenizer to Split Title into Words
-    title_words = nltk.word_tokenize(title)
-    # Normalize the Title Words by Lowercasing and Stemming using Porter Stemmer
-    normalized_title_words = normalize_tokens(title_words, porter)
-    # Add Each Normalized Title Word to the Index Dictionary with the Document ID and Term Frequency
-    for word in normalized_title_words:
-        add_term(postings_dict, word, doc_id)
         
 # Function to build index for Content of the Document
-def index_court(court_name, doc_id, postings_dict, valid_courts):
-    if court_name in valid_courts:
-        add_term(postings_dict, court_name, doc_id)
+def index_court(court_name, doc_id, postings_dict):
+    # Preserve Court Name Exactly because they have special semantic meaning
+    add_term(postings_dict, court_name, doc_id)
 
-# Function to do Document_Length_Calculation for LTC Weighting Scheme
+# Function to do Document_Length_Calculation for LNC Weighting Scheme
 # Logarithm for Term Frequency (TF)
-# Logarithm for Inverse Document Frequency (IDF)
 # Square Root for Document Length Normalization
 
-def document_length_calculation(index_dictionary, total_documents):
+def document_length_calculation(index_dictionary):
     document_lengths = {}
     for term in index_dictionary:
         for doc_id, tf in index_dictionary[term].items():
@@ -125,23 +118,14 @@ def build_index(input_directory, output_file_dictionary, output_file_postings):
     # Initialize Porter Stemmer
     porter = PorterStemmer()
     
-    # List of Courts as Provided in the Dataset
-    courts = ['SG Court of Appeal', 'SG Privy Council', 'UK House of Lords', 'UK Supreme Court', 'High Court of Australia', 'CA Supreme Court', 
-              'SG High Court', "Singapore International Commercial Court", "HK High Court", "HK Court of First Instance", "UK Crown Court",
-              "UK Court of Appeal", "UK High Court","Federal Court of Australia", "NSW Court of Appeal", "NSW Court of Criminal Appeal", "NSW Supreme Court"]
-    
-    # Total Number of Documents in the Dataset for IDF Calculation
-    total_documents = 0
-    
     # Iterate through all cases in the input directory using the iter_cases generator
     for _, case in enumerate(iter_cases(input_directory)):
-        total_documents += 1
-        index_content(case['content'], case['document_id'], index_content_dictionary, porter)
-        index_title(case['title'], case['document_id'], index_title_dictionary, porter)
-        index_court(case['court'], case['document_id'], index_court_dictionary, courts)
+        index_content_title_text(case['content'], case['document_id'], index_content_dictionary, porter)
+        index_content_title_text(case['title'], case['document_id'], index_title_dictionary, porter)
+        index_court(case['court'], case['document_id'], index_court_dictionary)
         
-    document_content_lengths = document_length_calculation(index_content_dictionary, total_documents)
-    document_title_lengths = document_length_calculation(index_title_dictionary, total_documents)
+    document_content_lengths = document_length_calculation(index_content_dictionary)
+    document_title_lengths = document_length_calculation(index_title_dictionary)
     
     # Write to the output dictionary and postings files
     with open(output_file_dictionary, 'w', encoding='utf-8') as dict_file, \
