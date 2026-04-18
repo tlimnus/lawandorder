@@ -156,8 +156,6 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                                     # Since this is an expanded term, we give it lighter weight
                                     temporary_array.append([(doc_id, 0.3) for doc_id, _ in posting_list])
                             intermediate_posting_list_array.append(union_posting_lists_for_query_expansion(temporary_array))
-                    else:
-                        intermediate_posting_list_array.append([])
                 
                 elif term[0] == "PHRASE":
                     # Extract List of Phrasal Terms
