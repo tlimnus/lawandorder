@@ -81,11 +81,18 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                     # If it is a normal term, we will normalize the term with Porter Stemming and Lowercasing
                     normalized_term = PorterStemmer().stem(term[1].lower())
                     # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
-                    if normalized_term in cached_dictionary_terms:
-                        _, offset = parse_dictionary_result["content_dict"][normalized_term]
-                        posting_list = parse_postings_line(postings_file, offset)
-                        #  Initialize each relevant doc_id for the term with score value of 1.0
-                        intermediate_posting_list_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                    if normalized_term in parse_dictionary_result["content_dict"]:
+                        # add prefix expansions for TERM only as Query Expansion
+                        expanded_terms = query_expansion_by_prefix(normalized_term, cached_dictionary_terms)
+                        for expanded_term in expanded_terms:
+                            _, offset = parse_dictionary_result["content_dict"][expanded_term]
+                            posting_list = parse_postings_line(postings_file, offset)
+                            if expanded_term == normalized_term:
+                                #  Initialize each relevant doc_id for the term with score value of 1.0 for the actual term
+                                intermediate_posting_list_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                            elif expanded_term != normalized_term:
+                                # Since this is an expanded term, we give it lighter weight
+                                intermediate_posting_list_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
                     else:
                         intermediate_posting_list_array.append([])
                 
@@ -441,14 +448,40 @@ def read_postings_at_offset(postings_file, offset):
     return line
 
 # Function to Perform Query Expansion by Prefix Matching for a Given Query Term 
-def query_expansion_by_prefix(query_term, dictionary_terms):
-    # Use bisect to find the insertion point for the query term in the sorted list of dictionary terms:
+def query_expansion_by_prefix(query_term, dictionary_terms, max_expansions=10, min_length=4):
+    """
+    Returns a small list of prefix-matched expansion terms.
+
+    Rules:
+    - do not include the original term itself
+    - cap number of expansions
+    - only expand sensible terms
+    """
+    # avoid expanding very short or non-alphabetic terms
+    if not query_term or len(query_term) < min_length or not query_term.isalpha():
+        return [query_term]
+
+    # Use bisect to find insertion point for query_term in sorted dictionary_terms
     index = bisect.bisect_left(dictionary_terms, query_term)
-    expanded_terms = []
-    
-    while index < len(dictionary_terms) and dictionary_terms[index].startswith(query_term):
-        expanded_terms.append(dictionary_terms[index])
+    expanded_terms = [query_term]
+
+    while index < len(dictionary_terms):
+        candidate = dictionary_terms[index]
+
+        # stop once prefix no longer matches
+        if not candidate.startswith(query_term):
+            break
+
+        # do not include the term itself
+        if candidate != query_term:
+            expanded_terms.append(candidate)
+
+        # cap expansions to avoid too much noise
+        if len(expanded_terms) >= max_expansions:
+            break
+
         index += 1
+
     return expanded_terms
 
 def relevance_feedback_by_rocchio(query_term, relevant_docs, irrelevent_docs):
