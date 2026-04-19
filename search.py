@@ -290,7 +290,6 @@ def parse_normal_postings_line(postings_file, offset):
 
     return postings
 
-<<<<<<< HEAD
 def positional_bonus_score_calculation(query_text, content_dictionary, postings_file):
     """
     Positional bonus scoring with ordered proximity:
@@ -554,61 +553,6 @@ def is_consecutive_chain(chain):
         if chain[i + 1] != chain[i] + 1:
             return False
     return True
-=======
-# Function to get positional bonus scores for phrasal queries and free text queries
-def positional_bonus_score_calculation(query_text, content_dictionary, postings_file):
-    # Since its a Free Text Query, split it and do positional matching to get a stronger signal
-        positional_query_terms = query_text.strip().split()
-        processing_positional_term_array = []
-            
-        # For each term, do normalization and then add it to the processing array in the order in which the terms appear in
-        for positional_query_term in positional_query_terms:
-            normalized_positional_query_terms = normalize_query_text(positional_query_term)
-            for normalized_positional_query_term in normalized_positional_query_terms:
-                if normalized_positional_query_term in content_dictionary:
-                    _, offset = content_dictionary[normalized_positional_query_term]
-                    posting_list = parse_postings_line(postings_file, offset)
-                    processing_positional_term_array.append(posting_list)
-                    
-        # Do pairwise positional matching
-        # Start by creating pairwise indices
-        indices = list(range(len(processing_positional_term_array)))
-        pairs = list(zip(indices, indices[1:]))
-            
-        positional_bonus_scores = {}
-            
-        # Where i and j are consecutive indices of the array processing_positional_term_array
-        for i, j in pairs:
-            posting_list_1 = processing_positional_term_array[i]
-            posting_list_2 = processing_positional_term_array[j]
-            
-            # Convert postings lists into doc_id -> positions dictionary
-            posting_dict_1 = dict(posting_list_1)
-            posting_dict_2 = dict(posting_list_2)
-            
-            # Intersect docs containing both adjacent terms
-            common_docs = set(posting_dict_1.keys()) & set(posting_dict_2.keys())
-            
-            # Iterate through all common_doc between the 2 consecutive words while keeping the ordering
-            for doc_id in common_docs:
-                positions1 = posting_dict_1[doc_id]
-                positions2 = posting_dict_2[doc_id]
-                
-                adjacent_count = count_adjacent_matches(positions1, positions2)
-                
-                if adjacent_count > 0:
-                    positional_bonus_scores[doc_id] = positional_bonus_scores.get(doc_id, 0) + adjacent_count
-        return positional_bonus_scores
-
-# Function to do adjacent terms counting
-def count_adjacent_matches(positions1, positions2):
-    positions2_set = set(positions2)
-    count = 0
-    for p in positions1:
-        if (p + 1) in positions2_set:
-            count += 1
-    return count
->>>>>>> 2d9df34e33564bfe7fc5686218c383b6f792f38e
 
 # Function to do Cosine Similarity, followed by taking the top 10 as relevant
 # Adjust the query vector based on relevance feedback
@@ -632,11 +576,7 @@ def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_
             
     return results
 
-<<<<<<< HEAD
 def combine_scores(content_scores, title_scores, positional_bonus_scores, title_weight=0.5, positional_bonus_weight = 0.25):
-=======
-def combine_scores(content_scores, title_scores, positional_bonus_scores, title_weight=0.5, positional_bonus_weight = 0.2):
->>>>>>> 2d9df34e33564bfe7fc5686218c383b6f792f38e
     combined = defaultdict(float)
 
     for doc_id, score in content_scores:
