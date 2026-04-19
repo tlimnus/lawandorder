@@ -49,7 +49,8 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
     query_tf = {}
     
     # Cache list of dictionary terms for query expansion to avoid repeated retrieval from the dictionary
-    cached_dictionary_terms = sorted(parse_dictionary_result["content_dict"].keys())
+    # Commented out as we are not doing query expansion
+    # cached_dictionary_terms = sorted(parse_dictionary_result["content_dict"].keys())
     
     with open(file_of_output, "w", encoding="utf-8") as results_file, open(postings_file, "r", encoding="utf-8") as postings_file:
         # Handle FREE_TEXT queries first
@@ -431,7 +432,7 @@ def find_docs_with_full_ordered_phrase(processing_positional_term_array):
         return {}
 
     # Convert each term's postings into:
-    # doc_id -> positions list
+    # dictionary in the shape of doc_id -> positions list
     positional_dicts = [dict(posting_list) for posting_list in processing_positional_term_array]
 
     # Candidate docs must contain ALL query terms
@@ -439,6 +440,10 @@ def find_docs_with_full_ordered_phrase(processing_positional_term_array):
     for posting_dict in positional_dicts[1:]:
         candidate_docs &= set(posting_dict.keys())
 
+    # If there are no common documents for all terms, no documents have teh full ordered phrase, return empty
+    if len(candidate_docs) == 0:
+        return {}
+    
     # Store full-query ordered bonus for each matching doc
     doc_bonus_scores = {}
 
@@ -469,7 +474,7 @@ def find_docs_with_full_ordered_phrase(processing_positional_term_array):
 
         # Reward ordered occurrence of the full query
         # Tighter span => larger reward
-        bonus = 2.0 / (1 + (span - exact_span)) + query_length
+        bonus = 2.0 / (1 + (span - exact_span))
 
         # Extra reward if the entire chain is exactly consecutive
         if span == exact_span and is_consecutive_chain(best_chain):
@@ -483,6 +488,15 @@ def find_best_ordered_chain(positions_lists):
     """
     Find one ordered chain p1 < p2 < p3 < ... with minimum span.
     Returns the best chain as a list of positions, or None if no chain exists.
+    
+    Accepts list of position lists for 1 document like
+    
+    [
+        [pos1, pos2],
+        [pos3, pos4],
+    ]
+    
+    where the arrays are positional list for the query terms in sequence
     """
 
     # Start from every possible position of the first query term
