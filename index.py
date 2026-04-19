@@ -62,7 +62,7 @@ def normalize_tokens(tokens, porter):
 
     return normalized
 
-# Function to Add Term to the Index Dictionary, used for both content and title indexing
+# Function to Add Term to the Index Dictionary, used for both court indexing
 def add_term(postings_dict, term, doc_id):
     # If Term is not in posting_dict, initialize term and doc_id
     if term not in postings_dict:
@@ -73,19 +73,25 @@ def add_term(postings_dict, term, doc_id):
     # if term and doc_id is inside, then can increment it
     else:
         postings_dict[term][doc_id] += 1
+
+def add_term_position(postings_dict, term, position, doc_id):
+    # If term is not in posting_dict, initialise
+    if term not in postings_dict:
+        postings_dict[term] = {}
+    if doc_id not in postings_dict[term]:
+        postings_dict[term][doc_id] = []
+    # Append the position of the term
+    postings_dict[term][doc_id].append(position)
         
 # Function to build index for Content and Title of the Document
 def index_content_title_text(text, doc_id, postings_dict, porter):
-    # Use NLTK Tokenizer to Split Document into Sentences
-    sentences = nltk.sent_tokenize(text)
-    for sentence in sentences:
-        # Use NLTK Word Tokenizer to tokenize the words in the sentence
-        words = nltk.word_tokenize(sentence)
-        # Normalize the Tokens by Lowercasing and Stemming using Porter Stemmer
-        normalized_words = normalize_tokens(words, porter)
-        # Add Each Normalized Word to the Index Dictionary with the Document ID and Term Frequency
-        for word in normalized_words:
-            add_term(postings_dict, word, doc_id)
+    # Use NLTK Word Tokenizer to tokenize the words in the text
+    words = nltk.word_tokenize(text)
+    # Normalize the Tokens by Lowercasing and Stemming using Porter Stemmer
+    normalized_words = normalize_tokens(words, porter)
+    # Add Each Normalized Word to the Index Dictionary with the Document ID and Term Frequency
+    for position, word in enumerate(normalized_words):
+        add_term_position(postings_dict, word, position, doc_id)
         
 # Function to build index for Content of the Document
 def index_court(court_name, doc_id, postings_dict):
@@ -99,10 +105,9 @@ def index_court(court_name, doc_id, postings_dict):
 def document_length_calculation(index_dictionary):
     document_lengths = {}
     for term in index_dictionary:
-        for doc_id, tf in index_dictionary[term].items():
+        for doc_id, positional_indice in index_dictionary[term].items():
             # Calculate the Term Frequency (TF) term for LNC weighting scheme
-            tf_weight = 1 + math.log10(tf)
-            
+            tf_weight = 1 + math.log10(len(positional_indice))
             if doc_id not in document_lengths:
                 document_lengths[doc_id] = 0
             
@@ -113,14 +118,38 @@ def document_length_calculation(index_dictionary):
         
     return document_lengths
 
-# Function to Write the Different Index Dictionaries to the Output Dictionary and Postings Files in the Required Format
-def write_index_to_dict(index_dictionary, dict_file, postings_file):
+# Function to write positional index to dictionary file
+def write_positional_index_to_dict(index_dictionary, dict_file, postings_file):
+    # Sort the terms alphabetically
     for term in sorted(index_dictionary.keys()):
+        # Get the offset of the postings_file
         offset = postings_file.tell()
         number_of_documents = len(index_dictionary[term])
         dict_file.write(f"{term} {number_of_documents} {offset}\n")
-        document_frequency_pairs = list(sorted(index_dictionary[term].items()))
-        postings_file.write(" ".join(str(frequency_pair) for frequency_pair in document_frequency_pairs) + "\n")
+
+        postings_parts = []
+        # Sort based on document id
+        for doc_id, positions in sorted(index_dictionary[term].items()):
+            # join the positions with comma and append to postings_parts using f string
+            positions_str = ",".join(map(str, positions))
+            postings_parts.append(f"{doc_id}:{positions_str}")
+
+        postings_file.write(" ".join(postings_parts) + "\n")
+        
+# Function to write normal index to dictionary file
+def write_normal_index_to_dict(index_dictionary, dict_file, postings_file):
+    # Sort the terms alphabetically
+    for term in sorted(index_dictionary.keys()):
+        # Get the offset of the postings_file
+        offset = postings_file.tell()
+        number_of_documents = len(index_dictionary[term])
+        dict_file.write(f"{term} {number_of_documents} {offset}\n")
+        
+        postings_parts = []
+        for doc_id, tf in sorted(index_dictionary[term].items()):
+            postings_parts.append(f"{doc_id}:{tf}")
+
+        postings_file.write(" ".join(postings_parts) + "\n")       
 
 # Function to Write the Different Document Lengths for Content and Title to the Output Dictionary File
 def write_document_lengths(document_lengths, dict_file):
@@ -149,11 +178,11 @@ def build_index(input_directory, output_file_dictionary, output_file_postings):
     with open(output_file_dictionary, 'w', encoding='utf-8') as dict_file, \
      open(output_file_postings, 'w', encoding='utf-8') as postings_file:
         dict_file.write("DICTIONARY TERMS FOR CONTENT" + "\n")
-        write_index_to_dict(index_content_dictionary, dict_file, postings_file)
+        write_positional_index_to_dict(index_content_dictionary, dict_file, postings_file)
         dict_file.write("DICTIONARY TERMS FOR TITLE" + "\n")
-        write_index_to_dict(index_title_dictionary, dict_file, postings_file)
+        write_positional_index_to_dict(index_title_dictionary, dict_file, postings_file)
         dict_file.write("DICTIONARY TERMS FOR COURT" + "\n")
-        write_index_to_dict(index_court_dictionary, dict_file, postings_file)
+        write_normal_index_to_dict(index_court_dictionary, dict_file, postings_file)
         dict_file.write("DOCUMENT LENGTHS FOR CONTENT" + "\n")
         write_document_lengths(document_content_lengths, dict_file)
         dict_file.write("DOCUMENT LENGTH FOR TITLE" + "\n")

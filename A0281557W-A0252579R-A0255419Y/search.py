@@ -269,8 +269,8 @@ def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_
         return_doc_vectors=True
     )
     
-    # Rocchio pseudo-relevance feedback: treat top-10 as relevant
-    pseudo_relevant = [doc_vectors[doc_id] for doc_id, _ in initial_results[:10] if doc_id in doc_vectors]
+    # Rocchio pseudo-relevance feedback: treat top-15 as relevant
+    pseudo_relevant = [doc_vectors[doc_id] for doc_id, _ in initial_results[:15] if doc_id in doc_vectors]
     if pseudo_relevant:
         # do relevance feedback using rocchio
         expanded_weights = relevance_feedback_by_rocchio(query_weights, pseudo_relevant, [])

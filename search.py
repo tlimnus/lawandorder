@@ -61,6 +61,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
             if court_results is not None:
                 results_file.write(" ".join(str(x[0]) for x in court_results))
                 return
+            
             for term in parsed_query:
                 # It should be of type tuple and be length 2
                 if not isinstance(term, tuple) or len(term) != 2:
@@ -77,6 +78,8 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                             normalized_terms = normalize_query_text(phrase_word)
                             for normalized_term in normalized_terms:
                                 query_tf[normalized_term] = query_tf.get(normalized_term, 0) + 1
+            
+            positional_bonus_scores = positional_bonus_score_calculation(query, parse_dictionary_result["content_dict"], postings_file)
 
             # Let N be the total number of documents
             N = len(parse_dictionary_result["content_doc_lengths"])
@@ -113,7 +116,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 parse_dictionary_result["title_doc_lengths"],
                 postings_file
             )
-            results = combine_field_scores(content_results, title_results)
+            results = combine_scores(content_results, title_results, positional_bonus_scores, title_weight=0.5, positional_bonus_weight=0.2)
                 
             # Each element in result is a tuple of (doc_id, tf-idf score value)
             results_file.write(" ".join(str(x[0]) for x in results))
@@ -144,18 +147,20 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                         temporary_array = []
                         # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
                         if normalized_term in parse_dictionary_result["content_dict"]:
-                            # add prefix expansions for TERM only as Query Expansion
-                            expanded_terms = query_expansion_by_prefix(normalized_term, cached_dictionary_terms)
-                            for expanded_term in expanded_terms:
-                                _, offset = parse_dictionary_result["content_dict"][expanded_term]
-                                posting_list = parse_postings_line(postings_file, offset)
-                                if expanded_term == normalized_term:
-                                    #  Initialize each relevant doc_id for the term with score value of 1.0 for the actual term
-                                    temporary_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
-                                elif expanded_term != normalized_term:
-                                    # Since this is an expanded term, we give it lighter weight
-                                    temporary_array.append([(doc_id, 0.3) for doc_id, _ in posting_list])
-                            intermediate_posting_list_array.append(union_posting_lists_for_query_expansion(temporary_array))
+                            # Choose not to do query expansion for boolean terms
+                            # expanded_terms = query_expansion_by_prefix(normalized_term, cached_dictionary_terms)
+                            _, offset = parse_dictionary_result["content_dict"][normalized_term]
+                            posting_list = parse_postings_line(postings_file, offset)
+                            #  Initialize each relevant doc_id for the term with score value of 1.0 for the actual term
+                            temporary_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                
+                    # If temporary array means that the Normalized Boolean Terms have doc_id 
+                    if temporary_array:
+                        # Union it if the Normalization results in more than 1 term and all terms are treated as relevant
+                        merged = union_posting_lists_for_query_expansion(temporary_array)
+                        intermediate_posting_list_array.append(merged)
+                    else:
+                        intermediate_posting_list_array.append([])
                 
                 elif term[0] == "PHRASE":
                     # Extract List of Phrasal Terms
@@ -175,6 +180,9 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                     if court_results is not None:
                         intermediate_posting_list_array.append(court_results)
                         continue
+                    
+                    # Do positional bonus calculation so that we account for positional semantic meaning
+                    positional_bonus_scores = positional_bonus_score_calculation(phrase_text,  parse_dictionary_result["content_dict"], postings_file)
                     
                     # For each term in the phrasal query, we will do normalization and do query term frequency counting for the phrasal query
                     normalized_phrasal_terms = []
@@ -213,10 +221,12 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                         postings_file
                     )
 
-                    phrasal_query_results = combine_field_scores(
+                    phrasal_query_results = combine_scores(
                         content_phrase_results,
                         title_phrase_results,
-                        title_weight= 0.5
+                        positional_bonus_scores,
+                        title_weight= 0.5,
+                        positional_bonus_weight=0.2
                     )
                     
                     # Sort by doc_id so that we can do set AND operations using 2 pointers
@@ -258,7 +268,74 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
             final_results = sorted(final_results, key=lambda x: x[1], reverse=True)
             results_file.write(" ".join(str(x[0]) for x in final_results))
             return
+
+# Function to parse court posting line as it is stored as a normal posting without positional index
+def parse_normal_postings_line(postings_file, offset):
+    line = read_postings_at_offset(postings_file, offset).strip()
+    postings = []
+    if not line:
+        return postings
+
+    for entry in line.split():
+        doc_id, tf_str = entry.split(":")
+        postings.append((doc_id, int(tf_str)))
+
+    return postings
+
+# Function to get positional bonus scores for phrasal queries and free text queries
+def positional_bonus_score_calculation(query_text, content_dictionary, postings_file):
+    # Since its a Free Text Query, split it and do positional matching to get a stronger signal
+        positional_query_terms = query_text.strip().split()
+        processing_positional_term_array = []
+            
+        # For each term, do normalization and then add it to the processing array in the order in which the terms appear in
+        for positional_query_term in positional_query_terms:
+            normalized_positional_query_terms = normalize_query_text(positional_query_term)
+            for normalized_positional_query_term in normalized_positional_query_terms:
+                if normalized_positional_query_term in content_dictionary:
+                    _, offset = content_dictionary[normalized_positional_query_term]
+                    posting_list = parse_postings_line(postings_file, offset)
+                    processing_positional_term_array.append(posting_list)
+                    
+        # Do pairwise positional matching
+        # Start by creating pairwise indices
+        indices = list(range(len(processing_positional_term_array)))
+        pairs = list(zip(indices, indices[1:]))
+            
+        positional_bonus_scores = {}
+            
+        # Where i and j are consecutive indices of the array processing_positional_term_array
+        for i, j in pairs:
+            posting_list_1 = processing_positional_term_array[i]
+            posting_list_2 = processing_positional_term_array[j]
+            
+            # Convert postings lists into doc_id -> positions dictionary
+            posting_dict_1 = dict(posting_list_1)
+            posting_dict_2 = dict(posting_list_2)
+            
+            # Intersect docs containing both adjacent terms
+            common_docs = set(posting_dict_1.keys()) & set(posting_dict_2.keys())
+            
+            # Iterate through all common_doc between the 2 consecutive words while keeping the ordering
+            for doc_id in common_docs:
+                positions1 = posting_dict_1[doc_id]
+                positions2 = posting_dict_2[doc_id]
                 
+                adjacent_count = count_adjacent_matches(positions1, positions2)
+                
+                if adjacent_count > 0:
+                    positional_bonus_scores[doc_id] = positional_bonus_scores.get(doc_id, 0) + adjacent_count
+        return positional_bonus_scores
+
+# Function to do adjacent terms counting
+def count_adjacent_matches(positions1, positions2):
+    positions2_set = set(positions2)
+    count = 0
+    for p in positions1:
+        if (p + 1) in positions2_set:
+            count += 1
+    return count
+
 # Function to do Cosine Similarity, followed by taking the top 10 as relevant
 # Adjust the query vector based on relevance feedback
 # Do Cosine Similarity again based on the new query feedback
@@ -269,8 +346,8 @@ def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_
         return_doc_vectors=True
     )
     
-    # Rocchio pseudo-relevance feedback: treat top-10 as relevant
-    pseudo_relevant = [doc_vectors[doc_id] for doc_id, _ in initial_results[:10] if doc_id in doc_vectors]
+    # Rocchio pseudo-relevance feedback: treat top-15 as relevant
+    pseudo_relevant = [doc_vectors[doc_id] for doc_id, _ in initial_results[:15] if doc_id in doc_vectors]
     if pseudo_relevant:
         # do relevance feedback using rocchio
         expanded_weights = relevance_feedback_by_rocchio(query_weights, pseudo_relevant, [])
@@ -281,7 +358,7 @@ def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_
             
     return results
 
-def combine_field_scores(content_scores, title_scores, title_weight=0.5):
+def combine_scores(content_scores, title_scores, positional_bonus_scores, title_weight=0.5, positional_bonus_weight = 0.2):
     combined = defaultdict(float)
 
     for doc_id, score in content_scores:
@@ -289,6 +366,9 @@ def combine_field_scores(content_scores, title_scores, title_weight=0.5):
 
     for doc_id, score in title_scores:
         combined[doc_id] += title_weight * score
+    
+    for doc_id, bonus in positional_bonus_scores.items():
+        combined[doc_id] = combined.get(doc_id, 0) + bonus * positional_bonus_weight
 
     return sorted(combined.items(), key=lambda x: x[1], reverse=True)
         
@@ -329,8 +409,9 @@ def calculate_cosine_similarity(query_weights, term_dictionary, doc_length, post
         # retrieve the postings list and parse
         postings_list = parse_postings_line(postings_file, offset)
         # Compute lnc document weight (log tf, no idf) and add to the running score for each document
-        for doc_id, tf_d in postings_list:
-            w_td = 1 + math.log10(tf_d)
+        for doc_id, positions in postings_list:
+            # get term frequecny from the number of positions the word appears in
+            w_td = 1 + math.log10(len(positions))
             scores[doc_id] = scores.get(doc_id, 0.0) + w_tq * w_td
             if return_doc_vectors:
                 # Store unnormalized lnc weight to be divided by doc length below
@@ -531,15 +612,20 @@ def parse_query(query):
         
     return processed_array, mode
 
-# Function to read posting file based on offset and parse the line to get the document_id and term frequencies
+# Function to parse postings line
 def parse_postings_line(postings_file, offset):
-    # Parses strings like: "(1, 2) (5, 7) (10, 1)"
-    line = read_postings_at_offset(postings_file, offset)
-    matches = re.findall(r"\(['\"]([^'\"]+)['\"],\s*(\d+)\)", line)
-    postings = []
+    # Parses strings like: "123:1,5,9 456:3,10"
+    line = read_postings_at_offset(postings_file, offset).strip()
 
-    for doc_id, tf in matches:
-        postings.append((str(doc_id), int(tf)))
+    postings = []
+    if not line:
+        return postings
+
+    for entry in line.split():
+        doc_id, positions_str = entry.split(":")
+        positions = list(map(int, positions_str.split(",")))
+        postings.append((doc_id, positions))
+
     return postings
 
 # Function to read posting file based on offset and parse the line
@@ -610,11 +696,11 @@ def get_court_posting_list_if_exact_match(query_text, court_dict, postings_file)
     # Check if there in exact match in court_dictionary
     if lowered_query in court_dict.keys():
         _, offset = court_dict[lowered_query]
-        posting_list = parse_postings_line(postings_file, offset)
+        posting_list = parse_normal_postings_line(postings_file, offset)
         return [(doc_id, 1.0) for doc_id, _ in posting_list]
     return None
     
-# Function to do Union on Query Term with its Expanded Terms
+# Function to do Union on Normalized Query Terms
 def union_posting_lists_for_query_expansion(intermediate_posting_list):
     merge_postings = {}
 
