@@ -145,11 +145,18 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                     for normalized_term in normalized_terms:
                         # Temporary Array to store the doc_id of original and expanded terms
                         temporary_array = []
-                        # Retrieve the posting list for the expanded term and add it to the intermediate posting list array
+                        # Retrieve the posting list for the normalized term for content and add it to the intermediate posting list array
                         if normalized_term in parse_dictionary_result["content_dict"]:
                             # Choose not to do query expansion for boolean terms
                             # expanded_terms = query_expansion_by_prefix(normalized_term, cached_dictionary_terms)
                             _, offset = parse_dictionary_result["content_dict"][normalized_term]
+                            posting_list = parse_postings_line(postings_file, offset)
+                            #  Initialize each relevant doc_id for the term with score value of 1.0 for the actual term
+                            temporary_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
+                            
+                        # Retrieve the posting list for the normalized term for title and add it to the intermediate posting list array
+                        if normalized_term in parse_dictionary_result["title_dict"]:
+                            _, offset = parse_dictionary_result["title_dict"][normalized_term]
                             posting_list = parse_postings_line(postings_file, offset)
                             #  Initialize each relevant doc_id for the term with score value of 1.0 for the actual term
                             temporary_array.append([(doc_id, 1.0) for doc_id, _ in posting_list])
