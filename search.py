@@ -655,7 +655,7 @@ def query_expansion_by_prefix(query_term, dictionary_terms, max_expansions=5):
 
 def relevance_feedback_by_rocchio(query_term, relevant_docs, irrelevent_docs):
     alpha=1.0
-    beta=0.65
+    beta=0.5
     gamma=0.15
     k=20
 
