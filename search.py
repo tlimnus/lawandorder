@@ -49,7 +49,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
     query_tf = {}
     
     # Cache list of dictionary terms for query expansion to avoid repeated retrieval from the dictionary
-    # Commented out as we are not doing query expansion
+    # Commented out because no longer doing query expansion
     # cached_dictionary_terms = sorted(parse_dictionary_result["content_dict"].keys())
     
     with open(file_of_output, "w", encoding="utf-8") as results_file, open(postings_file, "r", encoding="utf-8") as postings_file:
@@ -290,271 +290,63 @@ def parse_normal_postings_line(postings_file, offset):
 
     return postings
 
+# Function to get positional bonus scores for phrasal queries and free text queries
 def positional_bonus_score_calculation(query_text, content_dictionary, postings_file):
-    """
-    Positional bonus scoring with ordered proximity:
-    1. Reward close consecutive query-term matches using 1 / distance
-    2. Give extra reward if the full query appears in order, even with gaps
-    3. Give an even larger bonus if the full query is exactly side-by-side
+    # Since its a Free Text Query, split it and do positional matching to get a stronger signal
+        positional_query_terms = query_text.strip().split()
+        processing_positional_term_array = []
+            
+        # For each term, do normalization and then add it to the processing array in the order in which the terms appear in
+        for positional_query_term in positional_query_terms:
+            normalized_positional_query_terms = normalize_query_text(positional_query_term)
+            for normalized_positional_query_term in normalized_positional_query_terms:
+                if normalized_positional_query_term in content_dictionary:
+                    _, offset = content_dictionary[normalized_positional_query_term]
+                    posting_list = parse_postings_line(postings_file, offset)
+                    # processing_positional_term_array looks like [(doc_id,[pos1,pos2])]
+                    processing_positional_term_array.append(posting_list)
+                    
+        # Do pairwise positional matching
+        # Start by creating pairwise indices
+        indices = list(range(len(processing_positional_term_array)))
+        pairs = list(zip(indices, indices[1:]))
+            
+        positional_bonus_scores = {}
+            
+        # Where i and j are consecutive indices of the array processing_positional_term_array
+        for i, j in pairs:
+            posting_list_1 = processing_positional_term_array[i]
+            posting_list_2 = processing_positional_term_array[j]
+            
+            # Convert postings lists into doc_id -> positions dictionary
+            posting_dict_1 = dict(posting_list_1)
+            posting_dict_2 = dict(posting_list_2)
+            
+            # Intersect docs containing both adjacent terms
+            common_docs = set(posting_dict_1.keys()) & set(posting_dict_2.keys())
+            
+            # Iterate through all common_doc between the 2 consecutive words while keeping the ordering
+            for doc_id in common_docs:
+                # Positions that the 1st and 2nd term appear in the same document doc_id
+                positions1 = posting_dict_1[doc_id]
+                positions2 = posting_dict_2[doc_id]
+                
+                adjacent_count = count_adjacent_matches(positions1, positions2)
+                
+                if adjacent_count > 0:
+                    positional_bonus_scores[doc_id] = positional_bonus_scores.get(doc_id, 0) + adjacent_count
+        return positional_bonus_scores
 
-    Returns:
-        dict: {doc_id: positional_bonus_score}
-    """
+# Function to do adjacent terms counting
+def count_adjacent_matches(positions1, positions2):
+    positions2_set = set(positions2)
+    count = 0
+    for p in positions1:
+        if (p + 1) in positions2_set:
+            count += 1
+    return count
 
-    # Store all normalized query terms in order
-    # Example: "Breaches of Duty" -> ["breach", "of", "duti"] depending on your stemmer
-    normalized_query_terms = []
-    for raw_term in query_text.strip().split():
-        normalized_terms = normalize_query_text(raw_term)
-        normalized_query_terms.extend(normalized_terms)
-
-    # If nothing remains after normalization, return empty score map
-    if not normalized_query_terms:
-        return {}
-
-    # For each normalized query term, retrieve its positional postings list
-    # Final structure:
-    # [
-    #   [(doc_id, [positions...]), ...],   # postings for 1st query term
-    #   [(doc_id, [positions...]), ...],   # postings for 2nd query term
-    #   ...
-    # ]
-    processing_positional_term_array = []
-    for term in normalized_query_terms:
-        if term in content_dictionary:
-            _, offset = content_dictionary[term]
-            posting_list = parse_postings_line(postings_file, offset)
-            processing_positional_term_array.append(posting_list)
-        else:
-            # If a term is missing from dictionary, append empty postings
-            # This keeps query-term order aligned
-            processing_positional_term_array.append([])
-
-    # Final positional bonus score for each document
-    positional_bonus_scores = {}
-
-    # ---------------------------------------------------------
-    # Part 1: Pairwise ordered proximity scoring
-    # ---------------------------------------------------------
-    # Compare each consecutive query term pair:
-    # q1 with q2, q2 with q3, q3 with q4, ...
-    for i in range(len(processing_positional_term_array) - 1):
-        # Get postings for two consecutive query terms
-        posting_list_1 = processing_positional_term_array[i]
-        posting_list_2 = processing_positional_term_array[i + 1]
-
-        # Convert postings into dictionaries:
-        # doc_id -> positions list
-        posting_dict_1 = dict(posting_list_1)
-        posting_dict_2 = dict(posting_list_2)
-
-        # Keep only docs that contain both consecutive query terms
-        common_docs = set(posting_dict_1.keys()) & set(posting_dict_2.keys())
-
-        for doc_id in common_docs:
-            # Get the positions of term1 and term2 inside this doc
-            positions1 = posting_dict_1[doc_id]
-            positions2 = posting_dict_2[doc_id]
-
-            # Compute soft proximity score:
-            # closer ordered matches get higher score
-            pair_score = compute_pairwise_proximity_score(
-                positions1,
-                positions2,
-                max_window=8
-            )
-
-            # Add pair score to this document's total positional bonus
-            if pair_score > 0:
-                positional_bonus_scores[doc_id] = positional_bonus_scores.get(doc_id, 0.0) + pair_score
-
-    # ---------------------------------------------------------
-    # Part 2: Full-query ordered-chain bonus
-    # ---------------------------------------------------------
-    # If query has at least 2 terms, check whether the whole query
-    # appears in correct order in a document
-    if len(normalized_query_terms) >= 2:
-        ordered_phrase_scores = find_docs_with_full_ordered_phrase(processing_positional_term_array)
-
-        # Add the full-query ordered bonus into the final score map
-        for doc_id, chain_score in ordered_phrase_scores.items():
-            positional_bonus_scores[doc_id] = positional_bonus_scores.get(doc_id, 0.0) + chain_score
-
-    return positional_bonus_scores
-
-def compute_pairwise_proximity_score(positions1, positions2, max_window=8):
-    """
-    Compute proximity score between two position lists.
-
-    Reward closer ordered matches more strongly:
-        distance = 1 -> 1.0
-        distance = 2 -> 0.5
-        distance = 3 -> 0.333...
-    Only considers positions2 > positions1 and within max_window.
-    """
-    score = 0.0
-
-    # Try every occurrence of term1 against occurrences of term2
-    for p1 in positions1:
-        for p2 in positions2:
-            distance = p2 - p1
-
-            # If term2 appears before or at same place as term1,
-            # then ordering is wrong, so skip
-            if distance <= 0:
-                continue
-
-            # If too far apart, stop checking later p2 values
-            # because positions2 is assumed sorted
-            if distance > max_window:
-                break
-
-            # Closer distance gives higher reward
-            score += 1.0 / distance
-
-    return score
-
-def find_docs_with_full_ordered_phrase(processing_positional_term_array):
-    """
-    Returns:
-        {doc_id: ordered_phrase_bonus_score}
-
-    A document matches if the full query appears in the correct order:
-        p1 < p2 < p3 < ...
-    Gaps are allowed.
-
-    Smaller total span gets a higher bonus.
-    Exact side-by-side sequence gets an extra bonus.
-    """
-
-    # If there are no postings at all, return empty result
-    if not processing_positional_term_array:
-        return {}
-
-    # Convert each term's postings into:
-    # dictionary in the shape of doc_id -> positions list
-    positional_dicts = [dict(posting_list) for posting_list in processing_positional_term_array]
-
-    # Candidate docs must contain ALL query terms
-    candidate_docs = set(positional_dicts[0].keys())
-    for posting_dict in positional_dicts[1:]:
-        candidate_docs &= set(posting_dict.keys())
-
-    # If there are no common documents for all terms, no documents have teh full ordered phrase, return empty
-    if len(candidate_docs) == 0:
-        return {}
-    
-    # Store full-query ordered bonus for each matching doc
-    doc_bonus_scores = {}
-
-    for doc_id in candidate_docs:
-        # Build list of position lists for this document, one per query term
-        # Example:
-        # [
-        #   [5, 20],      # positions of 1st query term
-        #   [7, 22, 30],  # positions of 2nd query term
-        #   [10, 25]      # positions of 3rd query term
-        # ]
-        positions_lists = [positional_dict[doc_id] for positional_dict in positional_dicts]
-
-        # Find the best ordered chain with the smallest span
-        best_chain = find_best_ordered_chain(positions_lists)
-
-        # If no valid ordered chain exists, skip doc
-        if best_chain is None:
-            continue
-
-        # Span = last matched position - first matched position
-        # Smaller span means tighter grouping of the query terms
-        span = best_chain[-1] - best_chain[0]
-        query_length = len(best_chain)
-
-        # If terms were exactly consecutive, minimum possible span is query_length - 1
-        exact_span = query_length - 1
-
-        # Reward ordered occurrence of the full query
-        # Tighter span => larger reward
-        bonus = 2.0 / (1 + (span - exact_span))
-
-        # Extra reward if the entire chain is exactly consecutive
-        if span == exact_span and is_consecutive_chain(best_chain):
-            bonus += 2.0 * query_length
-
-        doc_bonus_scores[doc_id] = bonus
-
-    return doc_bonus_scores
-
-def find_best_ordered_chain(positions_lists):
-    """
-    Find one ordered chain p1 < p2 < p3 < ... with minimum span.
-    Returns the best chain as a list of positions, or None if no chain exists.
-    
-    Accepts list of position lists for 1 document like
-    
-    [
-        [pos1, pos2],
-        [pos3, pos4],
-    ]
-    
-    where the arrays are positional list for the query terms in sequence
-    """
-
-    # Start from every possible position of the first query term
-    first_positions = positions_lists[0]
-
-    best_chain = None
-    best_span = float("inf")
-
-    for start_pos in first_positions:
-        # Build a candidate ordered chain starting from start_pos
-        chain = [start_pos]
-        current_pos = start_pos
-        valid = True
-
-        # For each later query term, find the first position strictly after current_pos
-        for next_positions in positions_lists[1:]:
-            next_pos = find_smallest_position_greater_than(next_positions, current_pos)
-
-            # If cannot extend the chain, this starting point fails
-            if next_pos is None:
-                valid = False
-                break
-
-            chain.append(next_pos)
-            current_pos = next_pos
-
-        # If we formed a full valid chain, check whether its span is best so far
-        if valid:
-            span = chain[-1] - chain[0]
-            if span < best_span:
-                best_span = span
-                best_chain = chain
-
-    return best_chain
-
-def find_smallest_position_greater_than(positions, current_pos):
-    """
-    Return the smallest position in positions such that position > current_pos.
-    Assumes positions is sorted.
-    """
-
-    for p in positions:
-        if p > current_pos:
-            return p
-    return None
-
-def is_consecutive_chain(chain):
-    """
-    Check whether chain is exactly consecutive:
-        p, p+1, p+2, ...
-    """
-
-    for i in range(len(chain) - 1):
-        if chain[i + 1] != chain[i] + 1:
-            return False
-    return True
-
-# Function to do Cosine Similarity, followed by taking the top 10 as relevant
+# Function to do Cosine Similarity, followed by taking the top 15 as relevant
 # Adjust the query vector based on relevance feedback
 # Do Cosine Similarity again based on the new query feedback
 def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_document_length, postings_file):
@@ -576,7 +368,7 @@ def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_
             
     return results
 
-def combine_scores(content_scores, title_scores, positional_bonus_scores, title_weight=0.5, positional_bonus_weight = 0.25):
+def combine_scores(content_scores, title_scores, positional_bonus_scores, title_weight=0.5, positional_bonus_weight = 0.2):
     combined = defaultdict(float)
 
     for doc_id, score in content_scores:
@@ -875,7 +667,7 @@ def relevance_feedback_by_rocchio(query_term, relevant_docs, irrelevent_docs):
     alpha=1.0
     beta=0.5
     gamma=0.15
-    k=20
+    k=10
 
     if irrelevent_docs is None:
         irrelevent_docs = []
