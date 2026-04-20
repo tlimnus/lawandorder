@@ -263,7 +263,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                     current_doc_id, current_score = current_list[j]
 
                     if final_doc_id == current_doc_id:
-                        merged_results.append((final_doc_id, final_score * current_score))
+                        merged_results.append((final_doc_id, final_score + current_score))
                         i += 1
                         j += 1
                     elif final_doc_id < current_doc_id:
@@ -331,20 +331,33 @@ def positional_bonus_score_calculation(query_text, content_dictionary, postings_
                 positions1 = posting_dict_1[doc_id]
                 positions2 = posting_dict_2[doc_id]
                 
-                adjacent_count = count_adjacent_matches(positions1, positions2)
+                adjacent_count =  shortest_distance_bonus(positions1, positions2)
                 
                 if adjacent_count > 0:
                     positional_bonus_scores[doc_id] = positional_bonus_scores.get(doc_id, 0) + adjacent_count
         return positional_bonus_scores
 
-# Function to do adjacent terms counting
-def count_adjacent_matches(positions1, positions2):
-    positions2_set = set(positions2)
-    count = 0
-    for p in positions1:
-        if (p + 1) in positions2_set:
-            count += 1
-    return count
+# Function to calculate the proximity bonus for terms in the query, by using the shortest forward distance
+def shortest_distance_bonus(positions1, positions2):
+    i, j = 0, 0
+    shortest_distance = float("inf")
+    
+    while i < len(positions1) and j < len(positions2):
+        p1 = positions1[i]
+        p2 = positions2[j]
+        
+        # Preserve ordering: second term must appear after first term
+        if p2 <= p1:
+            j += 1
+        else:
+            shortest_distance = min(shortest_distance, p2 - p1)
+            i += 1
+    
+    if shortest_distance == float("inf"):
+        return 0.0
+    
+    # Closer words get higher bonus
+    return 1.0 / shortest_distance
 
 # Function to do Cosine Similarity, followed by taking the top 15 as relevant
 # Adjust the query vector based on relevance feedback
@@ -427,9 +440,12 @@ def calculate_cosine_similarity(query_weights, term_dictionary, doc_length, post
                 # Store unnormalized lnc weight to be divided by doc length below
                 doc_vectors[doc_id][term] = w_td
 
+    # Length Normalization minimizer
+    LENGTH_NORMALIZATION_CONSTANT = 0.3
+
     # Normalize each document score by its precomputed document length and the query length
     for doc_id in list(scores.keys()):
-        length = doc_length.get(doc_id, 0)
+        length = doc_length.get(doc_id, 0) ** LENGTH_NORMALIZATION_CONSTANT
         if length != 0 and query_length != 0:
             scores[doc_id] /= (length * query_length)
             if return_doc_vectors:
