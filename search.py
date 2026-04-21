@@ -117,7 +117,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                 parse_dictionary_result["title_doc_lengths"],
                 postings_file
             )
-            results = combine_scores(content_results, title_results, positional_bonus_scores, title_weight=0.5, positional_bonus_weight=0.2)
+            results = combine_scores(content_results, title_results, positional_bonus_scores, title_weight=0, positional_bonus_weight=0.2)
                 
             # Each element in result is a tuple of (doc_id, tf-idf score value)
             results_file.write(" ".join(str(x[0]) for x in results))
@@ -233,7 +233,7 @@ def run_search(dictionary_file, postings_file, file_of_queries, file_of_output):
                         content_phrase_results,
                         title_phrase_results,
                         positional_bonus_scores,
-                        title_weight= 0.5,
+                        title_weight= 0,
                         positional_bonus_weight=0.2
                     )
                     
@@ -331,7 +331,7 @@ def positional_bonus_score_calculation(query_text, content_dictionary, postings_
                 positions1 = posting_dict_1[doc_id]
                 positions2 = posting_dict_2[doc_id]
                 
-                adjacent_count =  shortest_distance_bonus(positions1, positions2)
+                adjacent_count = shortest_distance_bonus(positions1, positions2)
                 
                 if adjacent_count > 0:
                     positional_bonus_scores[doc_id] = positional_bonus_scores.get(doc_id, 0) + adjacent_count
@@ -359,7 +359,7 @@ def shortest_distance_bonus(positions1, positions2):
     # Closer words get higher bonus
     return 1.0 / shortest_distance
 
-# Function to do Cosine Similarity, followed by taking the top 15 as relevant
+# Function to do Cosine Similarity, followed by taking the top 5 as relevant
 # Adjust the query vector based on relevance feedback
 # Do Cosine Similarity again based on the new query feedback
 def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_document_length, postings_file):
@@ -369,8 +369,8 @@ def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_
         return_doc_vectors=True
     )
     
-    # Rocchio pseudo-relevance feedback: treat top-15 as relevant
-    pseudo_relevant = [doc_vectors[doc_id] for doc_id, _ in initial_results[:15] if doc_id in doc_vectors]
+    # Rocchio pseudo-relevance feedback: treat top-5 as relevant
+    pseudo_relevant = [doc_vectors[doc_id] for doc_id, _ in initial_results[:5] if doc_id in doc_vectors]
     if pseudo_relevant:
         # do relevance feedback using rocchio
         expanded_weights = relevance_feedback_by_rocchio(query_weights, pseudo_relevant, [])
@@ -381,7 +381,7 @@ def pseudo_relevant_feedback_ranking(query_weights, content_dictionary, content_
             
     return results
 
-def combine_scores(content_scores, title_scores, positional_bonus_scores, title_weight=0.5, positional_bonus_weight = 0.2):
+def combine_scores(content_scores, title_scores, positional_bonus_scores, title_weight=0, positional_bonus_weight = 0.2):
     combined = defaultdict(float)
 
     for doc_id, score in content_scores:
